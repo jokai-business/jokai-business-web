@@ -1,0 +1,37 @@
+'use client';
+
+import {useEffect, useState, type FormEvent} from 'react';
+import AIExtraction from './ai-extraction';
+import {api} from '@/lib/api/client';
+import type {components} from '@/lib/api/schema';
+
+type Capture=components['schemas']['InvoiceCapture'];
+type Fields=components['schemas']['InvoiceCaptureFields'];
+const labels:Record<keyof Fields,string>={invoiceNumber:'Invoice number',invoiceDate:'Invoice date',dueDate:'Due date',vendor:'Vendor',currency:'Currency',subtotal:'Subtotal',tax:'Tax',total:'Total'};
+const fieldNames=Object.keys(labels) as (keyof Fields)[];
+const message=(e:unknown)=>e instanceof Error?e.message:'Could not save the invoice fields.';
+export default function InvoiceCapture({id,canReview}:{id:string;canReview:boolean}){
+ const [aiVersion,setAIVersion]=useState(0);
+ const [capture,setCapture]=useState<Capture>(),[fields,setFields]=useState<Fields>(),[loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[revision,setRevision]=useState(0);
+ useEffect(()=>{let active=true;api.GET('/api/v1/documents/{id}/invoice-capture',{params:{path:{id}}}).then(({data,error})=>{if(error)throw new Error(error.error.message);if(active){setCapture(data.data);setFields(data.data.fields);setAIVersion(0);setError('');}}).catch(e=>{if(active)setError(message(e));}).finally(()=>{if(active)setLoading(false);});return()=>{active=false;};},[id,revision]);
+ function reload(){setLoading(true);setRevision(v=>v+1);}
+ async function save(e:FormEvent<HTMLFormElement>){e.preventDefault();if(!capture||!fields)return;setBusy(true);setError('');setNotice('');try{const {error}=await api.PUT('/api/v1/documents/{id}/invoice-capture',{params:{path:{id}},body:{version:capture.version,sourceOcrVersion:capture.sourceOcrVersion,fields,aiVersion}});if(error)throw new Error(error.error.message);setNotice('Invoice field draft saved. Review every field before recording.');reload();}catch(e){setError(message(e));}finally{setBusy(false);}}
+ async function record(e:FormEvent<HTMLFormElement>){e.preventDefault();if(!capture)return;if(new FormData(e.currentTarget).get('confirmed')!=='on'){setError('Confirm that you checked every field.');return;}setBusy(true);setError('');setNotice('');try{const {error}=await api.POST('/api/v1/documents/{id}/invoice-capture/record',{params:{path:{id}},body:{version:capture.version,confirmed:true}});if(error)throw new Error(error.error.message);setNotice('Reviewed source invoice recorded.');reload();}catch(e){setError(message(e));}finally{setBusy(false);}}
+ const dirty=aiVersion>0||(fields&&capture&&JSON.stringify(fields)!==JSON.stringify(capture.fields));
+ return <section className="card" aria-label="Source invoice fields"><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-lg font-semibold">Source invoice fields</h2>{capture&&<span className="status-badge">{capture.status==='recorded'?'Recorded':capture.status==='draft'?'Draft':'Review required'}</span>}</div>
+ <p className="mt-3 text-sm leading-6 text-slate-500">For invoice documents, review these eight fields against the original. Saving a reviewed source record keeps the data with this document. It does not issue a customer invoice, post accounting entries or record payment.</p>
+ {error&&<p role="alert" className="finance-error mt-4">{error}</p>}{notice&&<p role="status" className="mt-4 text-sm text-emerald-800">{notice}</p>}
+ {loading?<p className="mt-4 text-sm">Loading invoice fields…</p>:capture&&fields&&<>
+ {capture.status==='awaiting_text'?<p className="mt-4 text-sm">Approve the extracted text first.</p>:<>
+ {capture.status!=='recorded'&&<p className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">Default suggestions match explicit labels in approved text. Optional AI extraction is available below. Missing, repeated or unsupported values stay blank. Check every value, including tax and currency. Amounts use up to two decimal places.</p>}
+ {canReview&&capture.status!=='recorded'&&<AIExtraction key={`${id}:${revision}`} id={id} disabled={busy} onApply={(suggestion,version)=>{setFields(suggestion.fields);setAIVersion(version);setNotice('AI suggestions applied to the form. Review each field before saving.');}}/>}
+ {canReview&&capture.status!=='recorded'?<><form className="mt-5 space-y-4" onSubmit={save}><div className="grid gap-4 sm:grid-cols-2">{fieldNames.map(name=><label className="label" key={name}>{labels[name]}<input className="field" value={fields[name]} disabled={busy} type={name==='invoiceDate'||name==='dueDate'?'date':'text'} maxLength={name==='currency'?3:name==='subtotal'||name==='tax'||name==='total'?15:200} inputMode={name==='subtotal'||name==='tax'||name==='total'?'decimal':undefined} placeholder={name==='currency'?'USD':name==='subtotal'||name==='tax'||name==='total'?'0.00':undefined} onChange={e=>setFields({...fields,[name]:e.target.value})}/></label>)}</div><button className="button" disabled={busy}>Save field draft</button></form>
+ <form onSubmit={record} className="mt-6 space-y-4 border-t border-slate-100 pt-5"><p className="text-sm text-slate-500">Recording locks this snapshot. All eight fields are required, the due date must follow or equal the invoice date, and subtotal + tax must equal total. Check whether this invoice was already recorded from another upload.</p><label className="flex items-start gap-3 text-sm"><input className="mt-1" type="checkbox" name="confirmed" required disabled={busy||!!dirty||capture.status!=='draft'}/>I checked all fields against the original and confirm this source invoice record.</label><button className="button" disabled={busy||!!dirty||capture.status!=='draft'}>Record reviewed invoice</button>{(dirty||capture.status!=='draft')&&<p className="text-xs text-slate-500">Save the field draft before confirming the record.</p>}</form></>:<dl className="mt-5 grid gap-4 sm:grid-cols-2">{fieldNames.map(name=><div key={name}><dt className="text-sm text-slate-500">{labels[name]}</dt><dd className="mt-1 break-words text-sm font-medium">{fields[name]||'Not provided'}</dd></div>)}</dl>}
+ {capture.status==='recorded'&&<div className="mt-5 border-t border-slate-100 pt-4 text-xs leading-6 text-slate-500"><p>Recorded by {capture.reviewerName} · {capture.recordedAt&&new Date(capture.recordedAt).toLocaleString()}</p><p className="break-all">Source record ID: {capture.id}</p><p>Approved text version: {capture.sourceOcrVersion}</p><p className="break-all">Source SHA-256: {capture.sourceSha256}</p></div>}
+ {capture.aiProvenance&&<div className="mt-5 rounded-lg bg-slate-50 p-3 text-xs"><p>Original AI suggestions · {capture.aiProvenance.provider} · {capture.aiProvenance.model} · {capture.aiProvenance.promptVersion}</p><details className="mt-3"><summary>Saved source evidence</summary><pre className="mt-2 whitespace-pre-wrap break-words">{JSON.stringify(capture.aiProvenance.suggestion.evidence,null,2)}</pre></details></div>}
+ <details className="mt-5"><summary className="cursor-pointer text-sm">Original field suggestions</summary><dl className="mt-3 space-y-2 text-sm">{fieldNames.map(name=><div key={name}><dt className="text-slate-500">{labels[name]}</dt><dd className="break-words">{capture.suggestions[name]||'No unambiguous suggestion'}</dd></div>)}</dl></details>
+ </>}
+ </>}
+ <button className="secondary mt-5" disabled={busy} onClick={reload}>Reload invoice fields</button>
+ </section>;
+}

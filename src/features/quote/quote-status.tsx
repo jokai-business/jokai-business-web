@@ -1,0 +1,1 @@
+export default function QuoteStatus({status}:{status:string}){return <span className={`status-badge quote-status status-${status==='approved'||status==='accepted'?'active':status==='rejected'?'rejected':status==='draft'?'inactive':'prospect'}`}><span/>{status}</span>;}

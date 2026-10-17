@@ -1,0 +1,29 @@
+image: node:24-alpine
+stages: [validate, test, security, build]
+validate:
+  stage: validate
+  script:
+    - npm ci
+    - npm run generate:api
+    - git diff --exit-code src/lib/api/schema.d.ts
+    - npm run lint
+    - npm run typecheck
+security:
+  stage: security
+  script:
+    - npm ci
+    - npm audit --omit=dev
+build:
+  stage: build
+  script:
+    - npm ci
+    - npm run build
+
+e2e:
+  stage: test
+  image: mcr.microsoft.com/playwright:v1.63.0-noble
+  rules:
+    - if: '$E2E_BASE_URL && $E2E_ACCOUNTS_FILE'
+  script:
+    - npm ci
+    - BASE_URL="$E2E_BASE_URL" TEST_ACCOUNTS_FILE="$E2E_ACCOUNTS_FILE" npm run test:e2e

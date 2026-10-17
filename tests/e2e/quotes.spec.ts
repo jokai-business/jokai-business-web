@@ -1,0 +1,56 @@
+import {test,expect} from '@playwright/test';
+import {randomUUID} from 'node:crypto';
+import {login} from './helpers';
+const options={baseURL:process.env.BASE_URL||'https://localhost:8443',ignoreHTTPSErrors:!process.env.BASE_URL||process.env.E2E_ALLOW_SELF_SIGNED==='true'};
+
+test('product to quote, rejection revision, approval, PDF and recorded acceptance',async({page,browser,request})=>{
+ const admin=await login(page,'admin@example.test');const marker=randomUUID().slice(0,8);const productName=`Portal service ${marker}`;
+ await page.getByRole('button',{name:'Products',exact:true}).click();
+ await page.getByRole('button',{name:'New product',exact:true}).click();
+ await page.getByLabel('Product name',{exact:true}).fill(productName);await page.getByLabel('Unit',{exact:true}).fill('project');await page.getByLabel('Description',{exact:true}).fill('Design and implementation support.');await page.getByLabel('Price 1',{exact:true}).fill('1250.50');await page.getByRole('button',{name:'Save product',exact:true}).click();await expect(page.getByRole('heading',{name:productName,exact:true})).toBeVisible();
+ const product=(await (await request.get('/api/v1/products',{headers:admin,params:{q:productName}})).json()).data[0];
+ const salesPage=await browser.newPage(options);
+ try{
+ const sales=await login(salesPage,'sales@example.test');const customer=(await (await request.post('/api/v1/customers',{headers:sales,data:{name:`Quote customer ${marker}`}})).json()).data;const stages=(await (await request.get('/api/v1/pipeline-stages',{headers:sales})).json()).data;const opportunity=(await (await request.post('/api/v1/opportunities',{headers:sales,data:{title:`Portal deal ${marker}`,customerId:customer.id,stageId:stages[0].id,probability:40}})).json()).data;
+ await salesPage.goto(`/opportunities/${opportunity.id}`);await salesPage.getByRole('button',{name:'View quotes',exact:true}).click();await salesPage.getByRole('button',{name:'New quote',exact:true}).click();await expect(salesPage.getByLabel('Opportunity',{exact:true})).toHaveValue(opportunity.id);await salesPage.getByLabel('Search quote products',{exact:true}).fill(productName);await salesPage.getByRole('button',{name:'Find',exact:true}).last().click();await salesPage.getByRole('button',{name:`Add ${productName}`,exact:true}).click();await salesPage.getByLabel('Quantity 1',{exact:true}).fill('2');await salesPage.getByLabel('Discount 1',{exact:true}).fill('10');await salesPage.getByLabel('Expiry date',{exact:true}).fill('2099-12-01');await salesPage.getByLabel('Terms',{exact:true}).fill('Payment due within 30 days of acceptance.');await expect(salesPage.getByText('USD 2,250.90',{exact:true})).toBeVisible();
+ await salesPage.setViewportSize({width:390,height:844});expect(await salesPage.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await salesPage.getByRole('button',{name:'Save draft',exact:true}).click();await expect(salesPage.getByRole('button',{name:'Submit for approval',exact:true})).toBeVisible();const id=salesPage.url().split('/').at(-1)!;await salesPage.getByRole('button',{name:'Submit for approval',exact:true}).click();await expect(salesPage.getByText('Quote submitted.',{exact:true})).toBeVisible();await expect(salesPage.getByRole('button',{name:'Edit quote',exact:true})).toHaveCount(0);
+ await page.goto(`/quotes/${id}`);await page.getByLabel('Review note',{exact:true}).fill('Please clarify delivery scope.');await page.getByRole('button',{name:'Reject quote',exact:true}).click();await expect(page.getByText('Quote rejected.',{exact:true})).toBeVisible();await salesPage.reload();await salesPage.getByRole('button',{name:'Edit quote',exact:true}).click();await salesPage.getByLabel('Terms',{exact:true}).fill('Includes launch support. Payment due within 30 days.');await salesPage.getByRole('button',{name:'Save draft',exact:true}).click();await salesPage.getByRole('button',{name:'Submit for approval',exact:true}).click();await expect(salesPage.getByText('Quote submitted.',{exact:true})).toBeVisible();
+ await page.reload();await page.getByLabel('Review note',{exact:true}).fill('Scope confirmed.');await page.getByRole('button',{name:'Approve quote',exact:true}).click();await expect(page.getByText('Quote approved.',{exact:true})).toBeVisible();
+ const quote=(await (await request.get(`/api/v1/quotes/${id}`,{headers:sales})).json()).data;expect(quote.total).toBe('2250.90');expect(quote.approvals.map((a:{status:string})=>a.status)).toEqual(['approved','rejected']);
+ const {id:productId,...productBody}=product;expect((await request.put(`/api/v1/products/${productId}`,{headers:admin,data:{...productBody,name:productName+' revised',prices:[{currency:'USD',amount:'9999.00'}]}})).status()).toBe(200);
+ const unchanged=(await (await request.get(`/api/v1/quotes/${id}`,{headers:sales})).json()).data;expect(unchanged.items[0].name).toBe(productName);expect(unchanged.items[0].unitPrice).toBe('1250.50');expect(unchanged.total).toBe('2250.90');
+ await salesPage.reload();const downloadEvent=salesPage.waitForEvent('download');await salesPage.getByRole('button',{name:'Download PDF',exact:true}).click();const download=await downloadEvent;expect(download.suggestedFilename()).toBe(quote.number+'.pdf');expect(await download.failure()).toBeNull();
+ const pdf=await request.get(`/api/v1/quotes/${id}/pdf`,{headers:sales});expect(pdf.status()).toBe(200);expect(pdf.headers()['content-type']).toBe('application/pdf');expect((await pdf.body()).subarray(0,5).toString()).toBe('%PDF-');
+ await salesPage.getByRole('button',{name:'Mark as sent',exact:true}).click();await expect(salesPage.getByRole('button',{name:'Record acceptance',exact:true})).toBeVisible();await salesPage.getByRole('button',{name:'Record acceptance',exact:true}).click();await expect(salesPage.getByText('Customer acceptance recorded.',{exact:true})).toBeVisible();expect(await salesPage.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ await page.getByRole('button',{name:'Quotes',exact:true}).click();await page.getByLabel('Search quotes',{exact:true}).fill(quote.number);await page.getByRole('button',{name:'Search',exact:true}).click();await expect(page.getByRole('link',{name:quote.number,exact:true})).toBeVisible();
+ }finally{await salesPage.close();}
+});
+
+test('quote APIs enforce tenant relationships, workflow permissions, concurrency and expiry',async({page,browser,request})=>{
+ const admin=await login(page,'admin@example.test');const salesPage=await browser.newPage(options),otherPage=await browser.newPage(options);
+ try{
+ const sales=await login(salesPage,'sales@example.test'),other=await login(otherPage,'other@example.test');const marker=`Quote checks ${randomUUID()}`;
+ const productBody={name:marker,description:'API fixture',unit:'hour',active:true,version:0,prices:[{currency:'USD',amount:'100.00'}]};const product=(await (await request.post('/api/v1/products',{headers:admin,data:productBody})).json()).data;const foreignProduct=(await (await request.post('/api/v1/products',{headers:other,data:productBody})).json()).data;
+ const customer=(await (await request.post('/api/v1/customers',{headers:sales,data:{name:marker}})).json()).data;const stages=(await (await request.get('/api/v1/pipeline-stages',{headers:sales})).json()).data;const opportunity=(await (await request.post('/api/v1/opportunities',{headers:sales,data:{title:marker,customerId:customer.id,stageId:stages[0].id,probability:10}})).json()).data;
+ const body={opportunityId:opportunity.id,currency:'USD',expiryDate:'2099-12-01',terms:'Test terms',version:0,items:[{productId:product.id,quantity:'1.005',unitPrice:'1.00',discountPercent:'50'}]};const created=await request.post('/api/v1/quotes',{headers:sales,data:body});expect(created.status()).toBe(201);const quote=(await created.json()).data;expect(quote.subtotal).toBe('1.01');expect(quote.discountTotal).toBe('0.51');expect(quote.total).toBe('0.50');
+ for(const suffix of ['', '/pdf'])expect((await request.get(`/api/v1/quotes/${quote.id}${suffix}`,{headers:other})).status()).toBe(404);
+ expect((await request.put(`/api/v1/quotes/${quote.id}`,{headers:other,data:{...body,version:1}})).status()).toBe(404);
+ expect((await request.post(`/api/v1/quotes/${quote.id}/submit`,{headers:other,data:{version:1,note:''}})).status()).toBe(404);
+ expect((await (await request.get('/api/v1/quotes',{headers:other,params:{q:marker}})).json()).meta.total).toBe(0);
+ expect((await request.post('/api/v1/quotes',{headers:other,data:body})).status()).toBe(400);
+ for(const patch of [{items:[{...body.items[0],productId:foreignProduct.id}]},{currency:'EUR'},{items:[{...body.items[0],discountPercent:'100.01'}]},{total:'0.00'},{organization_id:'bad'}])expect((await request.post('/api/v1/quotes',{headers:sales,data:{...body,...patch}})).status()).toBe(400);
+ expect((await request.post('/api/v1/products',{headers:sales,data:productBody})).status()).toBe(403);expect((await request.put(`/api/v1/products/${product.id}`,{headers:other,data:{...productBody,version:1}})).status()).toBe(404);
+ expect((await request.post(`/api/v1/quotes/${quote.id}/approve`,{headers:sales,data:{version:1,note:''}})).status()).toBe(403);
+ expect((await request.post(`/api/v1/quotes/${quote.id}/mark-sent`,{headers:sales,data:{version:1,note:''}})).status()).toBe(409);
+ const concurrent=await Promise.all([1,2].map(()=>request.post(`/api/v1/quotes/${quote.id}/submit`,{headers:sales,data:{version:1,note:''}})));expect(concurrent.map(r=>r.status()).sort()).toEqual([200,409]);
+ expect((await request.put(`/api/v1/quotes/${quote.id}`,{headers:sales,data:{...body,version:2}})).status()).toBe(409);
+ expect((await request.post(`/api/v1/quotes/${quote.id}/reject`,{headers:admin,data:{version:2,note:''}})).status()).toBe(400);
+ expect((await request.post(`/api/v1/quotes/${quote.id}/approve`,{headers:admin,data:{version:1,note:''}})).status()).toBe(409);
+ expect((await request.post(`/api/v1/quotes/${quote.id}/approve`,{headers:admin,data:{version:2,note:'Checked'}})).status()).toBe(200);
+ expect((await request.post(`/api/v1/quotes/${quote.id}/approve`,{headers:admin,data:{version:3,note:''}})).status()).toBe(409);
+ const own=(await (await request.post('/api/v1/quotes',{headers:admin,data:body})).json()).data;await request.post(`/api/v1/quotes/${own.id}/submit`,{headers:admin,data:{version:1,note:''}});expect((await request.post(`/api/v1/quotes/${own.id}/approve`,{headers:admin,data:{version:2,note:''}})).status()).toBe(403);
+ const expired=(await (await request.post('/api/v1/quotes',{headers:sales,data:{...body,expiryDate:'2000-01-01'}})).json()).data;expect((await request.post(`/api/v1/quotes/${expired.id}/submit`,{headers:sales,data:{version:1,note:''}})).status()).toBe(409);
+ const first=await (await request.get('/api/v1/quotes',{headers:sales,params:{q:marker,pageSize:1}})).json();const second=await (await request.get('/api/v1/quotes',{headers:sales,params:{q:marker,pageSize:1,page:2}})).json();expect(first.meta.total).toBe(3);expect(second.meta.total).toBe(3);expect(first.data[0].id).not.toBe(second.data[0].id);
+ expect((await request.get('/api/v1/quotes',{headers:sales,params:{pageSize:101}})).status()).toBe(400);
+ }finally{await salesPage.close();await otherPage.close();}
+});

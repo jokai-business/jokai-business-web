@@ -1,0 +1,11 @@
+"use client";
+import {useEffect,useState} from 'react';
+import {api} from '@/lib/api/client';
+import type {components} from '@/lib/api/schema';
+export default function EmailPreferences(){
+ const [value,setValue]=useState<components['schemas']['NotificationPreferences']>();
+ const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[revision,setRevision]=useState(0);
+ useEffect(()=>{let active=true;void api.GET('/api/v1/notifications/preferences').then(r=>{if(!active)return;if(r.error){setError(r.error.error.message);return;}setValue(r.data.data);setError('');}).catch(()=>{if(active)setError('Could not load email preferences.');});return()=>{active=false;};},[revision]);
+ async function toggle(){if(!value||busy)return;const previous=value;setValue({...value,emailEnabled:!value.emailEnabled});setBusy(true);setError('');setNotice('');try{const r=await api.PUT('/api/v1/notifications/preferences',{body:{emailEnabled:!value.emailEnabled}});if(r.error)throw new Error(r.error.error.message);setValue(r.data.data);setNotice(r.data.data.emailEnabled?'Email preference saved.':'Email notifications turned off.');}catch(e){setValue(previous);setError(e instanceof Error?e.message:'Could not save email preferences.');}finally{setBusy(false);}}
+ return <section className="card my-6 space-y-3" aria-label="Email notifications"><h2 className="font-semibold">Email notifications</h2>{value?<><p className="text-sm text-slate-500">Receive a link to your inbox at <span className="break-all">{value.email}</span> for new alerts. Emails exclude record details and reminder notes.</p><label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={value.emailEnabled} disabled={busy} onChange={()=>void toggle()}/>Email me about new notifications</label>{!value.emailAvailable&&<p className="text-sm text-slate-500">Email delivery is not configured. Your preference is saved for when it becomes available.</p>}</>:!error&&<p role="status">Loading email preferences…</p>}{error&&<p role="alert" className="finance-error">{error} <button className="underline" disabled={busy} onClick={()=>setRevision(v=>v+1)}>Reload preference</button></p>}{notice&&<p role="status" className="text-sm text-emerald-800">{notice}</p>}</section>;
+}

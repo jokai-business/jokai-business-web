@@ -1,0 +1,23 @@
+import {test,expect} from '@playwright/test';
+import {login} from './helpers';
+test('sales defaults enforce access and versioning and prefill only new quote forms',async({page,request,browser})=>{
+ const admin=await login(page,'admin@example.test');const original=(await (await request.get('/api/v1/settings/sales',{headers:admin})).json()).data;let ownedVersion=original.version;
+ const other=await browser.newPage({baseURL:process.env.BASE_URL||'https://localhost:8443',ignoreHTTPSErrors:true});
+ try{
+ const sales=await login(other,'sales@example.test');expect((await request.get('/api/v1/settings/sales',{headers:sales})).status()).toBe(403);expect((await request.put('/api/v1/settings/sales',{headers:sales,data:original})).status()).toBe(403);
+ expect((await request.put('/api/v1/settings/sales',{headers:admin,data:{...original,validityDays:366}})).status()).toBe(400);expect((await request.put('/api/v1/settings/sales',{headers:admin,data:{...original,organizationId:'foreign'}})).status()).toBe(400);
+ await page.goto('/settings');const panel=page.getByRole('region',{name:'Sales defaults'});await panel.getByLabel('Quote validity (days)').fill('14');await panel.getByLabel('Default payment terms and conditions').fill('Payment in 14 days. បង់ប្រាក់');await panel.getByRole('button',{name:'Save sales defaults',exact:true}).click();await expect(panel.getByText('Sales defaults saved.',{exact:true})).toBeVisible();ownedVersion++;
+ expect((await request.put('/api/v1/settings/sales',{headers:admin,data:original})).status()).toBe(409);
+ const defaults=(await (await request.get('/api/v1/quotes/defaults',{headers:sales})).json()).data;expect(defaults.terms).toBe('Payment in 14 days. បង់ប្រាក់');const days=Math.round((Date.parse(defaults.expiryDate)-Date.parse(new Date().toISOString().slice(0,10)))/86400000);expect(days).toBe(14);
+ const stamp=Date.now();const product=(await (await request.post('/api/v1/products',{headers:admin,data:{name:`Defaults service ${stamp}`,description:'',unit:'project',active:true,prices:[{currency:'USD',amount:'10.00'}]}})).json()).data;
+ const customer=(await (await request.post('/api/v1/customers',{headers:sales,data:{name:`Defaults customer ${stamp}`}})).json()).data;const stages=(await (await request.get('/api/v1/pipeline-stages',{headers:sales})).json()).data;const opportunity=(await (await request.post('/api/v1/opportunities',{headers:sales,data:{title:`Defaults deal ${stamp}`,customerId:customer.id,stageId:stages[0].id,probability:10}})).json()).data;
+ await other.goto(`/opportunities/${opportunity.id}`);await other.getByRole('button',{name:'View quotes',exact:true}).click();await other.getByRole('button',{name:'New quote',exact:true}).click();await expect(other.getByLabel('Terms',{exact:true})).toHaveValue(defaults.terms);await expect(other.getByLabel('Expiry date',{exact:true})).toHaveValue(defaults.expiryDate);
+ const changed=await request.put('/api/v1/settings/sales',{headers:admin,data:{version:ownedVersion,validityDays:21,terms:'New terms for later drafts'}});expect(changed.status()).toBe(200);ownedVersion++;
+ await expect(other.getByLabel('Terms',{exact:true})).toHaveValue(defaults.terms);
+ await other.getByLabel('Search quote products',{exact:true}).fill(product.name);await other.getByRole('button',{name:'Find',exact:true}).last().click();await other.getByRole('button',{name:`Add ${product.name}`,exact:true}).click();await other.getByRole('button',{name:'Save draft',exact:true}).click();await expect(other.getByRole('button',{name:'Edit quote',exact:true})).toBeVisible();const id=other.url().split('/').at(-1)!;
+ const quote=(await (await request.get(`/api/v1/quotes/${id}`,{headers:sales})).json()).data;expect(quote.terms).toBe(defaults.terms);expect(quote.expiryDate).toBe(defaults.expiryDate);
+ await other.getByRole('button',{name:'Edit quote',exact:true}).click();await expect(other.getByLabel('Terms',{exact:true})).toHaveValue(defaults.terms);await expect(other.getByLabel('Expiry date',{exact:true})).toHaveValue(defaults.expiryDate);
+ await page.reload();await expect(panel.getByLabel('Quote validity (days)')).toHaveValue('21');await expect(panel.getByLabel('Default payment terms and conditions')).toHaveValue('New terms for later drafts');
+ await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await panel.screenshot({path:'test-results/sales-defaults-mobile.png'});
+ }finally{await other.close();const current=(await (await request.get('/api/v1/settings/sales',{headers:admin})).json()).data;if(current.version===ownedVersion)expect((await request.put('/api/v1/settings/sales',{headers:admin,data:{...original,version:ownedVersion}})).status()).toBe(200);}
+});
